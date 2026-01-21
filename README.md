@@ -61,3 +61,5 @@ This repo intentionally:
 - Removes internal file paths and organisation identifiers
 - Treats station codes/names as **non-sensitive labels** (or uses masked examples)
 - Omits any proprietary schema, governance language, and infrastructure details
+
+<img width="1024" height="501" alt="image" src="https://github.com/user-attachments/assets/f87ecf73-24f1-4043-b48d-642e20a9cd7b" />
