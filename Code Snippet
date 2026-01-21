@@ -1,0 +1,191 @@
+"""
+MiRiAD (Anonymised) – Rail OD Demand Dashboard
+Key patterns shown:
+- Filter-driven query/load
+- Region-coloured map markers (dash-leaflet)
+- OD passenger volume reshaping for time-series charting
+- Export filtered data to Excel
+- Collapsible sidebar + fullscreen chart UX
+"""
+
+from dash import Dash, dcc, html, Input, Output, State, dash_table, no_update
+import dash_bootstrap_components as dbc
+import dash_leaflet as dl
+import pandas as pd
+import plotly.express as px
+
+# ----------------------------
+# Data access (anonymised)
+# ----------------------------
+def load_default_od_data() -> pd.DataFrame:
+    """Replace with DB query in private version."""
+    return pd.read_csv("data/sample_od_volume.csv")
+
+def load_filtered_od_data(years, regions, origin_code, destination_codes=None) -> pd.DataFrame:
+    """Replace with parameterised SQL in private version."""
+    df = load_default_od_data()
+    if years:
+        df = df[df["year"].isin(years)]
+    if regions:
+        df = df[df["origin_region"].isin(regions)]
+    if origin_code:
+        df = df[df["origin_station_code"] == origin_code]
+    if destination_codes:
+        df = df[df["destination_station_code"].isin(destination_codes)]
+    return df
+
+
+# ----------------------------
+# Map marker styling
+# ----------------------------
+REGION_ICON_MAP = {
+    "Region A": "assets/markers/marker-green.png",
+    "Region B": "assets/markers/marker-orange.png",
+    "Region C": "assets/markers/marker-red.png",
+}
+DEFAULT_ICON = "assets/markers/marker-blue.png"
+
+def build_markers(df: pd.DataFrame):
+    markers = []
+    for _, row in df.iterrows():
+        if pd.notnull(row.get("lat")) and pd.notnull(row.get("lon")):
+            icon_url = REGION_ICON_MAP.get(row.get("origin_region"), DEFAULT_ICON)
+            popup = html.Div([
+                html.B("Origin: "), row.get("origin_station_name", ""), html.Br(),
+                html.B("Destination: "), row.get("destination_station_name", ""), html.Br(),
+            ])
+            markers.append(
+                dl.Marker(
+                    position=[row["lat"], row["lon"]],
+                    children=[dl.Tooltip(row.get("origin_station_name", "")), dl.Popup(popup)],
+                    icon=dict(iconUrl=icon_url, iconSize=[20, 41], iconAnchor=[10, 41]),
+                )
+            )
+    return markers
+
+
+# ----------------------------
+# Chart building
+# ----------------------------
+def build_volume_chart(df: pd.DataFrame):
+    """
+    Expects tidy columns: year, passenger_volume, origin_station_name, destination_station_name.
+    If your data is wide (passenger_volume_2018 etc), reshape before calling.
+    """
+    if df.empty:
+        return px.scatter(title="No data available")
+
+    fig = px.bar(
+        df,
+        x="year",
+        y="passenger_volume",
+        color="destination_station_name",
+        barmode="stack",
+        hover_data=["origin_station_name", "destination_station_name"],
+        title="Passenger Volume by Origin–Destination Pair",
+    )
+    fig.update_layout(title_x=0.5, xaxis=dict(type="category"))
+    return fig
+
+
+# ----------------------------
+# App layout
+# ----------------------------
+app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+app.title = "MiRiAD (Anonymised)"
+
+app.layout = dbc.Container(fluid=True, children=[
+    dcc.Store(id="store-data"),
+    dcc.Download(id="download-xlsx"),
+
+    dbc.Row([
+        dbc.Col([
+            html.H4("Filters"),
+            dcc.Dropdown(id="years", multi=True, placeholder="Select years"),
+            dcc.Dropdown(id="regions", multi=True, placeholder="Select regions"),
+            dcc.Dropdown(id="origin", placeholder="Select origin station"),
+            dcc.Dropdown(id="destinations", multi=True, placeholder="Select destinations (optional)"),
+            dbc.Button("Apply", id="apply", color="primary", className="mt-2"),
+            dbc.Button("Reset", id="reset", color="secondary", className="mt-2 ms-2"),
+        ], width=3),
+
+        dbc.Col([
+            dl.Map(
+                [dl.TileLayer(), dl.LayerGroup(id="layer-markers")],
+                center=[53.0, -1.5], zoom=6, style={"height": "55vh"}
+            ),
+            dbc.Button("Export Excel", id="export", color="success", className="mt-2"),
+        ], width=5),
+
+        dbc.Col([
+            dcc.Graph(id="chart", style={"height": "35vh"}),
+            html.Div(id="table"),
+        ], width=4),
+    ])
+])
+
+
+# ----------------------------
+# Callbacks (core flow)
+# ----------------------------
+@app.callback(
+    Output("store-data", "data"),
+    Input("apply", "n_clicks"),
+    State("years", "value"),
+    State("regions", "value"),
+    State("origin", "value"),
+    State("destinations", "value"),
+    prevent_initial_call=True,
+)
+def apply_filters(_, years, regions, origin_code, destination_codes):
+    if not (years and regions and origin_code):
+        return no_update
+    df = load_filtered_od_data(years, regions, origin_code, destination_codes)
+    return df.to_dict("records")
+
+
+@app.callback(
+    Output("layer-markers", "children"),
+    Output("chart", "figure"),
+    Output("table", "children"),
+    Input("store-data", "data"),
+)
+def render_outputs(data):
+    df = pd.DataFrame(data or [])
+    markers = build_markers(df)
+
+    # If wide format, reshape here. This snippet assumes tidy format already.
+    fig = build_volume_chart(df)
+
+    tbl = dash_table.DataTable(
+        columns=[{"name": c, "id": c} for c in df.columns],
+        data=df.to_dict("records"),
+        page_size=8,
+        style_table={"overflowX": "auto"},
+    ) if not df.empty else html.Div("No rows to display.")
+
+    return markers, fig, tbl
+
+
+@app.callback(
+    Output("download-xlsx", "data"),
+    Input("export", "n_clicks"),
+    State("store-data", "data"),
+    prevent_initial_call=True,
+)
+def export_xlsx(_, data):
+    df = pd.DataFrame(data or [])
+    if df.empty:
+        return no_update
+
+    keep_cols = [c for c in df.columns if c in {
+        "origin_station_name", "origin_station_code",
+        "destination_station_name", "destination_station_code",
+        "origin_region", "lat", "lon", "year", "passenger_volume"
+    }]
+    df = df[keep_cols] if keep_cols else df
+    return dcc.send_data_frame(df.to_excel, "miriad_export.xlsx", index=False)
+
+
+if __name__ == "__main__":
+    app.run_server(debug=True)
